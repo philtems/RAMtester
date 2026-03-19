@@ -1,12 +1,9 @@
 use std::env;
-use std::fs;
 use std::io::{self, Write, Read};
 use std::time::{Instant, Duration};
 use std::thread;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-
-// Ajouter l'import manquant pour rand
 use rand::Rng;
 
 // Constantes pour les messages en français
@@ -62,6 +59,97 @@ const EN_INTERRUPTED: &str = "Test interrupted by user.";
 const EN_ERROR_MAP: &str = "Memory Error Map";
 const EN_PRESS_ESC: &str = "Press ESC to continue...";
 const EN_BLOCK_SIZE: &str = "1 char = ";
+
+// Color constants for ANSI terminals
+#[cfg(not(target_os = "windows"))]
+mod colors {
+    pub const BRIGHT_WHITE: &str = "\x1b[97m";
+    pub const BRIGHT_CYAN: &str = "\x1b[96m";
+    pub const BRIGHT_MAGENTA: &str = "\x1b[95m";
+    pub const BRIGHT_YELLOW: &str = "\x1b[93m";
+    pub const BRIGHT_GREEN: &str = "\x1b[92m";
+    pub const BRIGHT_RED: &str = "\x1b[91m";
+    pub const BRIGHT_BLUE: &str = "\x1b[94m";
+    pub const RESET: &str = "\x1b[0m";
+    pub const BOLD: &str = "\x1b[1m";
+}
+
+// Color constants for Windows (empty strings, we'll use Windows API)
+#[cfg(target_os = "windows")]
+mod colors {
+    pub const BRIGHT_WHITE: &str = "";
+    pub const BRIGHT_CYAN: &str = "";
+    pub const BRIGHT_MAGENTA: &str = "";
+    pub const BRIGHT_YELLOW: &str = "";
+    pub const BRIGHT_GREEN: &str = "";
+    pub const BRIGHT_RED: &str = "";
+    pub const BRIGHT_BLUE: &str = "";
+    pub const RESET: &str = "";
+    pub const BOLD: &str = "";
+}
+
+use colors::*;
+
+// Windows console handling
+#[cfg(target_os = "windows")]
+mod windows_console {
+    use winapi::um::wincon::SetConsoleTextAttribute;
+    use winapi::um::processenv::GetStdHandle;
+    use winapi::um::winbase::STD_OUTPUT_HANDLE;
+    use winapi::um::wincon::{
+        FOREGROUND_RED, FOREGROUND_GREEN, FOREGROUND_BLUE,
+        FOREGROUND_INTENSITY,
+    };
+    use std::io;
+
+    pub struct ConsoleColor {
+        original_attrs: u16,
+    }
+
+    impl ConsoleColor {
+        pub fn new() -> io::Result<Self> {
+            unsafe {
+                let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+                if handle.is_null() {
+                    return Err(io::Error::last_os_error());
+                }
+                
+                // We can't get current attributes easily, so we'll assume default (white on black)
+                // In a real implementation, you'd use GetConsoleScreenBufferInfo
+                Ok(ConsoleColor { original_attrs: 7 }) // 7 = white on black
+            }
+        }
+
+        pub fn set_color(&self, color: u16) {
+            unsafe {
+                let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+                if !handle.is_null() {
+                    SetConsoleTextAttribute(handle, color);
+                }
+            }
+        }
+
+        pub fn reset(&self) {
+            self.set_color(self.original_attrs);
+        }
+    }
+
+    impl Drop for ConsoleColor {
+        fn drop(&mut self) {
+            self.reset();
+        }
+    }
+
+    // Color constants for Windows console
+    pub const WHITE: u16 = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    pub const CYAN: u16 = FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    pub const MAGENTA: u16 = FOREGROUND_RED | FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    pub const YELLOW: u16 = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+    pub const GREEN: u16 = FOREGROUND_GREEN | FOREGROUND_INTENSITY;
+    pub const RED: u16 = FOREGROUND_RED | FOREGROUND_INTENSITY;
+    pub const BLUE: u16 = FOREGROUND_BLUE | FOREGROUND_INTENSITY;
+    pub const RESET: u16 = 7; // Default gray
+}
 
 struct Messages {
     title: String,
@@ -166,7 +254,12 @@ fn detect_language() -> String {
     }
 }
 
+// Platform-specific memory detection with OS-specific percentages
+
+#[cfg(target_os = "linux")]
 fn get_available_memory() -> (u64, u64) {
+    use std::fs;
+    
     if let Ok(content) = fs::read_to_string("/proc/meminfo") {
         let mut total_memory = 0;
         let mut available_memory = 0;
@@ -183,42 +276,269 @@ fn get_available_memory() -> (u64, u64) {
             }
         }
         
-        let adjusted_available = (available_memory as f64 * 0.95) as u64;
+        // Linux: use 90% of available memory
+        let adjusted_available = (available_memory as f64 * 0.90) as u64;
         (total_memory, adjusted_available)
     } else {
         (0, 0)
     }
 }
 
-fn print_progress(progress: f32, elapsed: f64, phase: &str) {
+#[cfg(target_os = "freebsd")]
+fn get_available_memory() -> (u64, u64) {
+    use std::process::Command;
+    use std::str;
+    
+    // Get total memory using sysctl hw.physmem
+    let total_memory = if let Ok(output) = Command::new("sysctl").arg("-n").arg("hw.physmem").output() {
+        if let Ok(value) = str::from_utf8(&output.stdout) {
+            value.trim().parse::<u64>().unwrap_or(0)
+        } else { 0 }
+    } else { 0 };
+    
+    // Get available memory using sysctl vm.stats.vm.v_free_count
+    let free_pages = if let Ok(output) = Command::new("sysctl").arg("-n").arg("vm.stats.vm.v_free_count").output() {
+        if let Ok(value) = str::from_utf8(&output.stdout) {
+            value.trim().parse::<u64>().unwrap_or(0)
+        } else { 0 }
+    } else { 0 };
+    
+    // Get page size
+    let page_size = if let Ok(output) = Command::new("sysctl").arg("-n").arg("hw.pagesize").output() {
+        if let Ok(value) = str::from_utf8(&output.stdout) {
+            value.trim().parse::<u64>().unwrap_or(4096)
+        } else { 4096 }
+    } else { 4096 };
+    
+    let available_memory = free_pages * page_size;
+    // FreeBSD: use 80% of available memory
+    let adjusted_available = (available_memory as f64 * 0.80) as u64;
+    
+    (total_memory, adjusted_available)
+}
+
+#[cfg(target_os = "openbsd")]
+fn get_available_memory() -> (u64, u64) {
+    use std::process::Command;
+    use std::str;
+    
+    // Get total memory using sysctl hw.physmem
+    let total_memory = if let Ok(output) = Command::new("sysctl").arg("-n").arg("hw.physmem").output() {
+        if let Ok(value) = str::from_utf8(&output.stdout) {
+            value.trim().parse::<u64>().unwrap_or(0)
+        } else { 0 }
+    } else { 0 };
+    
+    // Get available memory using sysctl hw.usermem (approximation for OpenBSD)
+    let available_memory = if let Ok(output) = Command::new("sysctl").arg("-n").arg("hw.usermem").output() {
+        if let Ok(value) = str::from_utf8(&output.stdout) {
+            value.trim().parse::<u64>().unwrap_or(total_memory)
+        } else { total_memory }
+    } else { total_memory };
+    
+    // OpenBSD: use 80% of available memory
+    let adjusted_available = (available_memory as f64 * 0.80) as u64;
+    (total_memory, adjusted_available)
+}
+
+#[cfg(target_os = "macos")]
+fn get_available_memory() -> (u64, u64) {
+    use std::process::Command;
+    use std::str;
+    
+    // Get total memory using sysctl hw.memsize
+    let total_memory = if let Ok(output) = Command::new("sysctl").arg("-n").arg("hw.memsize").output() {
+        if let Ok(value) = str::from_utf8(&output.stdout) {
+            value.trim().parse::<u64>().unwrap_or(0)
+        } else { 0 }
+    } else { 0 };
+    
+    // Get memory pressure info using vm_stat
+    let available_memory = if let Ok(output) = Command::new("vm_stat").output() {
+        let output_str = str::from_utf8(&output.stdout).unwrap_or("");
+        let mut free_pages = 0;
+        let mut inactive_pages = 0;
+        let mut speculative_pages = 0;
+        let page_size = 4096; // macOS typically uses 4KB pages
+        
+        for line in output_str.lines() {
+            if line.contains("Pages free:") {
+                if let Some(value) = line.split(':').nth(1) {
+                    free_pages = value.trim().trim_end_matches('.').parse::<u64>().unwrap_or(0);
+                }
+            } else if line.contains("Pages inactive:") {
+                if let Some(value) = line.split(':').nth(1) {
+                    inactive_pages = value.trim().trim_end_matches('.').parse::<u64>().unwrap_or(0);
+                }
+            } else if line.contains("Pages speculative:") {
+                if let Some(value) = line.split(':').nth(1) {
+                    speculative_pages = value.trim().trim_end_matches('.').parse::<u64>().unwrap_or(0);
+                }
+            }
+        }
+        
+        (free_pages + inactive_pages + speculative_pages) * page_size
+    } else { total_memory / 2 }; // Fallback to half of total memory
+    
+    // macOS: use 90% of available memory (similar to Linux)
+    let adjusted_available = (available_memory as f64 * 0.90) as u64;
+    (total_memory, adjusted_available)
+}
+
+#[cfg(target_os = "windows")]
+fn get_available_memory() -> (u64, u64) {
+    use winapi::um::sysinfoapi::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use std::mem;
+    
+    unsafe {
+        let mut memory_status: MEMORYSTATUSEX = mem::zeroed();
+        memory_status.dwLength = mem::size_of::<MEMORYSTATUSEX>() as u32;
+        
+        if GlobalMemoryStatusEx(&mut memory_status) != 0 {
+            let total_memory = memory_status.ullTotalPhys;
+            let available_memory = memory_status.ullAvailPhys;
+            // Windows: use 90% of available memory
+            let adjusted_available = (available_memory as f64 * 0.90) as u64;
+            (total_memory, adjusted_available)
+        } else {
+            (0, 0)
+        }
+    }
+}
+
+// Fallback for other Unix-like systems
+#[cfg(not(any(target_os = "linux", target_os = "freebsd", 
+              target_os = "openbsd", target_os = "macos", 
+              target_os = "windows")))]
+fn get_available_memory() -> (u64, u64) {
+    (0, 0)
+}
+
+fn format_speed(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.2} GB/s", bytes_per_sec / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes_per_sec >= 1024.0 * 1024.0 {
+        format!("{:.2} MB/s", bytes_per_sec / (1024.0 * 1024.0))
+    } else if bytes_per_sec >= 1024.0 {
+        format!("{:.2} KB/s", bytes_per_sec / 1024.0)
+    } else {
+        format!("{:.0} B/s", bytes_per_sec)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn print_colored_text(color: &str, bold: &str, text: &str, reset: &str) {
+    print!("{}{}{}{}", color, bold, text, reset);
+}
+
+#[cfg(target_os = "windows")]
+fn print_colored_text(_color: &str, _bold: &str, text: &str, _reset: &str) {
+    // On Windows, we ignore the ANSI codes and just print the text
+    // Colors are handled by the Windows console API in the calling functions
+    print!("{}", text);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn print_colored_line(color: &str, bold: &str, text: &str, reset: &str) {
+    println!("{}{}{}{}", color, bold, text, reset);
+}
+
+#[cfg(target_os = "windows")]
+fn print_colored_line(_color: &str, _bold: &str, text: &str, _reset: &str) {
+    println!("{}", text);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn print_progress(progress: f32, elapsed: f64, speed: f64, phase: &str) {
     let remaining = if progress > 0.0 {
         (elapsed / progress as f64) * (100.0 - progress as f64)
     } else {
         0.0
     };
     
-    // Codes couleur ANSI
-    const CYAN: &str = "\x1b[36m";
-    const MAGENTA: &str = "\x1b[35m";
-    const YELLOW: &str = "\x1b[33m";
-    const RESET: &str = "\x1b[0m";
+    let speed_str = format_speed(speed);
     
     print!("\r[");
-    print!("{}", CYAN);
+    print!("{}{}", BRIGHT_CYAN, BOLD);
     print!("{:6.2}%", progress);
     print!("{}", RESET);
     print!("] ");
-    print!("{}", MAGENTA);
+    print!("{}{}", BRIGHT_MAGENTA, BOLD);
     print!("{}", phase);
     print!("{}", RESET);
     print!(" - Elapsed: ");
-    print!("{}", YELLOW);
+    print!("{}{}", BRIGHT_YELLOW, BOLD);
     print!("{:6.0}", elapsed);
     print!("{}", RESET);
     print!("s - Remaining: ");
-    print!("{}", YELLOW);
+    print!("{}{}", BRIGHT_YELLOW, BOLD);
     print!("{:6.0}", remaining);
-    print!("{}s   ", RESET);
+    print!("{}", RESET);
+    print!("s - Speed: ");
+    print!("{}{}", BRIGHT_GREEN, BOLD);
+    print!("{}", speed_str);
+    print!("{}   ", RESET);
+    
+    io::stdout().flush().unwrap();
+}
+
+#[cfg(target_os = "windows")]
+fn print_progress(progress: f32, elapsed: f64, speed: f64, phase: &str) {
+    use windows_console::*;
+    
+    let console = match ConsoleColor::new() {
+        Ok(c) => c,
+        Err(_) => {
+            // Fallback if console color initialization fails
+            print!("\r[{:6.2}%] {} - Elapsed: {:6.0}s - Remaining: {:6.0}s - Speed: {}   ", 
+                progress, phase, elapsed, 
+                if progress > 0.0 { (elapsed / progress as f64) * (100.0 - progress as f64) } else { 0.0 },
+                format_speed(speed));
+            io::stdout().flush().unwrap();
+            return;
+        }
+    };
+    
+    let remaining = if progress > 0.0 {
+        (elapsed / progress as f64) * (100.0 - progress as f64)
+    } else {
+        0.0
+    };
+    
+    let speed_str = format_speed(speed);
+    
+    // Clear the line and print with Windows colors
+    print!("\r");
+    
+    // Print percentage in cyan
+    console.set_color(CYAN);
+    print!("[{:6.2}%", progress);
+    console.set_color(RESET);
+    print!("] ");
+    
+    // Print phase in magenta
+    console.set_color(MAGENTA);
+    print!("{}", phase);
+    console.set_color(RESET);
+    print!(" - Elapsed: ");
+    
+    // Print elapsed time in yellow
+    console.set_color(YELLOW);
+    print!("{:6.0}", elapsed);
+    console.set_color(RESET);
+    print!("s - Remaining: ");
+    
+    // Print remaining time in yellow
+    console.set_color(YELLOW);
+    print!("{:6.0}", remaining);
+    console.set_color(RESET);
+    print!("s - Speed: ");
+    
+    // Print speed in green
+    console.set_color(GREEN);
+    print!("{}", speed_str);
+    console.set_color(RESET);
+    print!("   ");
     
     io::stdout().flush().unwrap();
 }
@@ -230,19 +550,67 @@ fn show_error_map(mem_errors: &[bool], total_size: usize, msgs: &Messages) {
     let errors_count = mem_errors.iter().filter(|&&x| x).count();
     
     if errors_count == 0 {
-        println!("\x1b[32mNo errors to display.\x1b[0m");
+        #[cfg(not(target_os = "windows"))]
+        println!("{}{}No errors to display.{}", BRIGHT_GREEN, BOLD, RESET);
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(GREEN);
+                println!("No errors to display.");
+                console.set_color(RESET);
+            } else {
+                println!("No errors to display.");
+            }
+        }
         return;
     }
     
     let blocks_per_char = (total_size / (MAP_WIDTH * MAP_HEIGHT)).max(1);
     let block_size = blocks_per_char;
     
-    println!("\n\x1b[33m{} ({} {})\x1b[0m", msgs.error_map, errors_count, msgs.total_errors);
-    println!("\x1b[33m{}{} bytes\x1b[0m", msgs.block_size, block_size);
-    println!("\x1b[33m+{}+\x1b[0m", "-".repeat(MAP_WIDTH));
+    #[cfg(not(target_os = "windows"))]
+    {
+        println!("\n{}{}{} ({} {}){}", 
+            BRIGHT_YELLOW, BOLD, msgs.error_map, errors_count, msgs.total_errors, RESET);
+        println!("{}{}{}{} bytes{}", 
+            BRIGHT_YELLOW, BOLD, msgs.block_size, block_size, RESET);
+        println!("{}{}+{}+{}", 
+            BRIGHT_YELLOW, BOLD, "-".repeat(MAP_WIDTH), RESET);
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        use windows_console::*;
+        if let Ok(console) = ConsoleColor::new() {
+            console.set_color(YELLOW);
+            println!("\n{} ({} {})", msgs.error_map, errors_count, msgs.total_errors);
+            println!("{}{} bytes", msgs.block_size, block_size);
+            println!("+{}+", "-".repeat(MAP_WIDTH));
+            console.set_color(RESET);
+        } else {
+            println!("\n{} ({} {})", msgs.error_map, errors_count, msgs.total_errors);
+            println!("{}{} bytes", msgs.block_size, block_size);
+            println!("+{}+", "-".repeat(MAP_WIDTH));
+        }
+    }
     
     for y in 0..MAP_HEIGHT {
-        print!("\x1b[33m|\x1b[0m");
+        #[cfg(not(target_os = "windows"))]
+        print!("{}{}|{}", BRIGHT_YELLOW, BOLD, RESET);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(YELLOW);
+                print!("|");
+                console.set_color(RESET);
+            } else {
+                print!("|");
+            }
+        }
+        
         for x in 0..MAP_WIDTH {
             let mut has_error = false;
             let start_block = (y * MAP_WIDTH + x) * blocks_per_char;
@@ -255,23 +623,78 @@ fn show_error_map(mem_errors: &[bool], total_size: usize, msgs: &Messages) {
                 }
             }
             
-            if has_error {
-                print!("\x1b[31m#\x1b[0m");
-            } else {
-                print!("\x1b[32m.\x1b[0m");
+            #[cfg(not(target_os = "windows"))]
+            {
+                if has_error {
+                    print!("{}{}#{}", BRIGHT_RED, BOLD, RESET);
+                } else {
+                    print!("{}{}.{}", BRIGHT_GREEN, BOLD, RESET);
+                }
+            }
+            
+            #[cfg(target_os = "windows")]
+            {
+                use windows_console::*;
+                if let Ok(console) = ConsoleColor::new() {
+                    if has_error {
+                        console.set_color(RED);
+                        print!("#");
+                    } else {
+                        console.set_color(GREEN);
+                        print!(".");
+                    }
+                    console.set_color(RESET);
+                } else {
+                    if has_error {
+                        print!("#");
+                    } else {
+                        print!(".");
+                    }
+                }
             }
         }
-        println!("\x1b[33m|\x1b[0m");
+        
+        #[cfg(not(target_os = "windows"))]
+        println!("{}{}|{}", BRIGHT_YELLOW, BOLD, RESET);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(YELLOW);
+                println!("|");
+                console.set_color(RESET);
+            } else {
+                println!("|");
+            }
+        }
     }
     
-    println!("\x1b[33m+{}+\x1b[0m", "-".repeat(MAP_WIDTH));
-    println!("\x1b[33m{}\x1b[0m", msgs.press_esc);
+    #[cfg(not(target_os = "windows"))]
+    {
+        println!("{}{}+{}+{}", 
+            BRIGHT_YELLOW, BOLD, "-".repeat(MAP_WIDTH), RESET);
+        println!("{}{}{}{}", BRIGHT_YELLOW, BOLD, msgs.press_esc, RESET);
+    }
     
-    // Lecture simple de l'entrée clavier
-    let mut stdin = io::stdin(); // CHANGÉ: déclaré comme mutable
+    #[cfg(target_os = "windows")]
+    {
+        use windows_console::*;
+        if let Ok(console) = ConsoleColor::new() {
+            console.set_color(YELLOW);
+            println!("+{}+", "-".repeat(MAP_WIDTH));
+            println!("{}", msgs.press_esc);
+            console.set_color(RESET);
+        } else {
+            println!("+{}+", "-".repeat(MAP_WIDTH));
+            println!("{}", msgs.press_esc);
+        }
+    }
+    
+    // Simple keyboard input reading
+    let mut stdin = io::stdin();
     let mut buffer = [0u8; 1];
     loop {
-        // Essayer de lire un caractère sans bloquer
         if let Ok(_) = stdin.read_exact(&mut buffer) {
             if buffer[0] == 27 || buffer[0] == b'q' || buffer[0] == b'Q' {
                 break;
@@ -298,24 +721,66 @@ fn test_ram(
     let mut mem_errors = vec![false; size];
     let mut errors = 0;
     
-    // Allouer la mémoire
+    // Allocate memory
     let mut memory = vec![0u8; size];
     
-    // Remplissage
-    println!("\x1b[34m{}\x1b[0m", msgs.filling_memory);
+    // Filling phase
+    #[cfg(not(target_os = "windows"))]
+    println!("\n{}{}{}{}", BRIGHT_BLUE, BOLD, msgs.filling_memory, RESET);
+    
+    #[cfg(target_os = "windows")]
+    {
+        use windows_console::*;
+        if let Ok(console) = ConsoleColor::new() {
+            console.set_color(BLUE);
+            println!("\n{}", msgs.filling_memory);
+            console.set_color(RESET);
+        } else {
+            println!("\n{}", msgs.filling_memory);
+        }
+    }
     
     let phase_start = Instant::now();
+    let mut last_update = Instant::now();
+    let mut last_bytes_processed = 0;
     
     for i in 0..size {
         memory[i] = ((i as u64 ^ pattern as u64) % 256) as u8;
         
         if i % update_interval == 0 && i > 0 {
-            let progress = (i as f32 / size as f32) * 100.0;
+            let now = Instant::now();
             let elapsed = phase_start.elapsed().as_secs_f64();
-            print_progress(progress, elapsed, &msgs.filling_memory);
+            let progress = (i as f32 / size as f32) * 100.0;
+            
+            // Calculate speed
+            let time_since_last = now.duration_since(last_update).as_secs_f64();
+            let bytes_since_last = (i - last_bytes_processed) as f64;
+            let instant_speed = if time_since_last > 0.0 {
+                bytes_since_last / time_since_last
+            } else {
+                0.0
+            };
+            
+            print_progress(progress, elapsed, instant_speed, &msgs.filling_memory);
+            
+            last_update = now;
+            last_bytes_processed = i;
             
             if check_interruption(interrupted) {
-                println!("\n\x1b[31m{}\x1b[0m", msgs.interrupted);
+                #[cfg(not(target_os = "windows"))]
+                println!("\n{}{}{}{}", BRIGHT_RED, BOLD, msgs.interrupted, RESET);
+                
+                #[cfg(target_os = "windows")]
+                {
+                    use windows_console::*;
+                    if let Ok(console) = ConsoleColor::new() {
+                        console.set_color(RED);
+                        println!("\n{}", msgs.interrupted);
+                        console.set_color(RESET);
+                    } else {
+                        println!("\n{}", msgs.interrupted);
+                    }
+                }
                 return true;
             }
         }
@@ -323,35 +788,117 @@ fn test_ram(
     
     if !check_interruption(interrupted) {
         *test_duration += phase_start.elapsed().as_secs_f64();
-        print_progress(100.0, phase_start.elapsed().as_secs_f64(), &msgs.filling_memory);
-        println!("\n\x1b[32m{}{:.2}s\x1b[0m", msgs.filling_complete, phase_start.elapsed().as_secs_f64());
+        let total_elapsed = phase_start.elapsed().as_secs_f64();
+        let avg_speed = size as f64 / total_elapsed;
+        print_progress(100.0, total_elapsed, avg_speed, &msgs.filling_memory);
+        
+        #[cfg(not(target_os = "windows"))]
+        println!("\n{}{}{}{:.2}s (avg: {}){}", 
+            BRIGHT_GREEN, BOLD, msgs.filling_complete, total_elapsed, format_speed(avg_speed), RESET);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(GREEN);
+                println!("\n{}{:.2}s (avg: {})", msgs.filling_complete, total_elapsed, format_speed(avg_speed));
+                console.set_color(RESET);
+            } else {
+                println!("\n{}{:.2}s (avg: {})", msgs.filling_complete, total_elapsed, format_speed(avg_speed));
+            }
+        }
     }
     
-    // Vérification
+    // Verification phase
     if !check_interruption(interrupted) {
-        println!("\n\x1b[34m{}\x1b[0m", msgs.verifying_memory);
+        #[cfg(not(target_os = "windows"))]
+        println!("\n{}{}{}{}", BRIGHT_BLUE, BOLD, msgs.verifying_memory, RESET);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(BLUE);
+                println!("\n{}", msgs.verifying_memory);
+                console.set_color(RESET);
+            } else {
+                println!("\n{}", msgs.verifying_memory);
+            }
+        }
         
         let phase_start = Instant::now();
+        let mut last_update = Instant::now();
+        let mut last_bytes_processed = 0;
         
         for i in 0..size {
             let expected_value = ((i as u64 ^ pattern as u64) % 256) as u8;
             if memory[i] != expected_value {
                 errors += 1;
                 mem_errors[i] = true;
-                println!("\n\x1b[31m{}0x{:016x} (got:{} vs exp:{})\x1b[0m", 
-                    msgs.error_at_address, 
+                
+                #[cfg(not(target_os = "windows"))]
+                println!("\n{}{}{}0x{:016x} (got:{} vs exp:{}){}", 
+                    BRIGHT_RED, BOLD, msgs.error_at_address, 
                     &memory[i] as *const u8 as usize,
                     memory[i], 
-                    expected_value);
+                    expected_value,
+                    RESET);
+                
+                #[cfg(target_os = "windows")]
+                {
+                    use windows_console::*;
+                    if let Ok(console) = ConsoleColor::new() {
+                        console.set_color(RED);
+                        println!("\n{}0x{:016x} (got:{} vs exp:{})", 
+                            msgs.error_at_address, 
+                            &memory[i] as *const u8 as usize,
+                            memory[i], 
+                            expected_value);
+                        console.set_color(RESET);
+                    } else {
+                        println!("\n{}0x{:016x} (got:{} vs exp:{})", 
+                            msgs.error_at_address, 
+                            &memory[i] as *const u8 as usize,
+                            memory[i], 
+                            expected_value);
+                    }
+                }
             }
             
             if i % update_interval == 0 && i > 0 {
-                let progress = (i as f32 / size as f32) * 100.0;
+                let now = Instant::now();
                 let elapsed = phase_start.elapsed().as_secs_f64();
-                print_progress(progress, elapsed, &msgs.verifying_memory);
+                let progress = (i as f32 / size as f32) * 100.0;
+                
+                // Calculate speed
+                let time_since_last = now.duration_since(last_update).as_secs_f64();
+                let bytes_since_last = (i - last_bytes_processed) as f64;
+                let instant_speed = if time_since_last > 0.0 {
+                    bytes_since_last / time_since_last
+                } else {
+                    0.0
+                };
+                
+                print_progress(progress, elapsed, instant_speed, &msgs.verifying_memory);
+                
+                last_update = now;
+                last_bytes_processed = i;
                 
                 if check_interruption(interrupted) {
-                    println!("\n\x1b[31m{}\x1b[0m", msgs.interrupted);
+                    #[cfg(not(target_os = "windows"))]
+                    println!("\n{}{}{}{}", BRIGHT_RED, BOLD, msgs.interrupted, RESET);
+                    
+                    #[cfg(target_os = "windows")]
+                    {
+                        use windows_console::*;
+                        if let Ok(console) = ConsoleColor::new() {
+                            console.set_color(RED);
+                            println!("\n{}", msgs.interrupted);
+                            console.set_color(RESET);
+                        } else {
+                            println!("\n{}", msgs.interrupted);
+                        }
+                    }
                     return true;
                 }
             }
@@ -359,16 +906,59 @@ fn test_ram(
         
         if !check_interruption(interrupted) {
             *test_duration += phase_start.elapsed().as_secs_f64();
-            print_progress(100.0, phase_start.elapsed().as_secs_f64(), &msgs.verifying_memory);
-            println!("\n\x1b[32m{}{:.2}s\x1b[0m", msgs.verification_complete, phase_start.elapsed().as_secs_f64());
+            let total_elapsed = phase_start.elapsed().as_secs_f64();
+            let avg_speed = size as f64 / total_elapsed;
+            print_progress(100.0, total_elapsed, avg_speed, &msgs.verifying_memory);
+            
+            #[cfg(not(target_os = "windows"))]
+            println!("\n{}{}{}{:.2}s (avg: {}){}", 
+                BRIGHT_GREEN, BOLD, msgs.verification_complete, total_elapsed, format_speed(avg_speed), RESET);
+            
+            #[cfg(target_os = "windows")]
+            {
+                use windows_console::*;
+                if let Ok(console) = ConsoleColor::new() {
+                    console.set_color(GREEN);
+                    println!("\n{}{:.2}s (avg: {})", msgs.verification_complete, total_elapsed, format_speed(avg_speed));
+                    console.set_color(RESET);
+                } else {
+                    println!("\n{}{:.2}s (avg: {})", msgs.verification_complete, total_elapsed, format_speed(avg_speed));
+                }
+            }
         }
     }
     
-    // Résultats
+    // Results
     if errors == 0 {
-        println!("\n\x1b[32m{}\x1b[0m", msgs.test_success);
+        #[cfg(not(target_os = "windows"))]
+        println!("\n{}{}{}{}", BRIGHT_GREEN, BOLD, msgs.test_success, RESET);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(GREEN);
+                println!("\n{}", msgs.test_success);
+                console.set_color(RESET);
+            } else {
+                println!("\n{}", msgs.test_success);
+            }
+        }
     } else {
-        println!("\n\x1b[31m{}{} errors.\x1b[0m", msgs.test_failed, errors);
+        #[cfg(not(target_os = "windows"))]
+        println!("\n{}{}{}{} errors.{}", BRIGHT_RED, BOLD, msgs.test_failed, errors, RESET);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(RED);
+                println!("\n{}{} errors.", msgs.test_failed, errors);
+                console.set_color(RESET);
+            } else {
+                println!("\n{}{} errors.", msgs.test_failed, errors);
+            }
+        }
         show_error_map(&mem_errors, size, msgs);
     }
     
@@ -379,18 +969,54 @@ fn test_ram(
 }
 
 fn main() {
+    // Initialize Windows console if needed
+    #[cfg(target_os = "windows")]
+    let _console = windows_console::ConsoleColor::new();
+    
     let lang = detect_language();
     let msgs = Messages::new(&lang);
     
     let args: Vec<String> = env::args().collect();
     
-    println!("{}", msgs.title);
-    println!("{}", msgs.author);
-    println!("{}", msgs.website);
+    #[cfg(not(target_os = "windows"))]
+    {
+        println!("{}{}{}", BRIGHT_WHITE, BOLD, msgs.title);
+        println!("{}{}", BRIGHT_WHITE, msgs.author);
+        println!("{}{}{}", BRIGHT_WHITE, msgs.website, RESET);
+    }
+    
+    #[cfg(target_os = "windows")]
+    {
+        use windows_console::*;
+        if let Ok(console) = ConsoleColor::new() {
+            console.set_color(WHITE);
+            println!("{}", msgs.title);
+            println!("{}", msgs.author);
+            println!("{}", msgs.website);
+            console.set_color(RESET);
+        } else {
+            println!("{}", msgs.title);
+            println!("{}", msgs.author);
+            println!("{}", msgs.website);
+        }
+    }
     println!();
     
     if args.len() < 2 {
-        println!("{}", msgs.usage);
+        #[cfg(not(target_os = "windows"))]
+        println!("{}{}{}{}", BRIGHT_YELLOW, BOLD, msgs.usage, RESET);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(YELLOW);
+                println!("{}", msgs.usage);
+                console.set_color(RESET);
+            } else {
+                println!("{}", msgs.usage);
+            }
+        }
         return;
     }
     
@@ -410,21 +1036,76 @@ fn main() {
             'M' => (value * 1024 * 1024) as usize,
             'G' => (value * 1024 * 1024 * 1024) as usize,
             _ => {
-                println!("\x1b[31m{}\x1b[0m", msgs.memory_unit_error);
+                #[cfg(not(target_os = "windows"))]
+                println!("{}{}{}{}", BRIGHT_RED, BOLD, msgs.memory_unit_error, RESET);
+                
+                #[cfg(target_os = "windows")]
+                {
+                    use windows_console::*;
+                    if let Ok(console) = ConsoleColor::new() {
+                        console.set_color(RED);
+                        println!("{}", msgs.memory_unit_error);
+                        console.set_color(RESET);
+                    } else {
+                        println!("{}", msgs.memory_unit_error);
+                    }
+                }
                 return;
             }
         }
     };
     
     if arg.to_uppercase() != "MAX" && size > available_mem as usize {
-        println!("\x1b[31m{}\x1b[0m\n", msgs.swap_warning);
+        #[cfg(not(target_os = "windows"))]
+        println!("{}{}{}{}\n", BRIGHT_RED, BOLD, msgs.swap_warning, RESET);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(RED);
+                println!("{}\n", msgs.swap_warning);
+                console.set_color(RESET);
+            } else {
+                println!("{}\n", msgs.swap_warning);
+            }
+        }
     }
     
-    println!("{}{:.1} MB.", msgs.total_memory, total_memory as f64 / (1024.0 * 1024.0));
-    println!("{}{} bytes ({} MB)", 
-        msgs.available_memory, 
-        available_mem, 
-        available_mem / (1024 * 1024));
+    if total_memory > 0 {
+        #[cfg(not(target_os = "windows"))]
+        {
+            println!("{}{}{:.1} MB.{}", 
+                BRIGHT_WHITE, msgs.total_memory, total_memory as f64 / (1024.0 * 1024.0), RESET);
+            println!("{}{}{} bytes ({} MB){}", 
+                BRIGHT_WHITE, msgs.available_memory, 
+                available_mem, 
+                available_mem / (1024 * 1024),
+                RESET);
+        }
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(WHITE);
+                println!("{}{:.1} MB.", msgs.total_memory, total_memory as f64 / (1024.0 * 1024.0));
+                println!("{}{} bytes ({} MB)", 
+                    msgs.available_memory, 
+                    available_mem, 
+                    available_mem / (1024 * 1024));
+                console.set_color(RESET);
+            } else {
+                println!("{}{:.1} MB.", msgs.total_memory, total_memory as f64 / (1024.0 * 1024.0));
+                println!("{}{} bytes ({} MB)", 
+                    msgs.available_memory, 
+                    available_mem, 
+                    available_mem / (1024 * 1024));
+            }
+        }
+    } else {
+        println!("Could not determine system memory. Assuming {} bytes available.", available_mem);
+    }
     println!();
     
     let interrupted = Arc::new(AtomicBool::new(false));
@@ -437,17 +1118,52 @@ fn main() {
     
     if loop_mode {
         loop {
-            // CORRIGÉ: utilisation correcte de gen_range
             let pattern = rng.gen_range(0..=255u8);
             loop_count += 1;
-            println!("Loop #{} - Pattern: {}", loop_count, pattern);
+            
+            #[cfg(not(target_os = "windows"))]
+            println!("{}{}Loop #{} - Pattern: {}{}", 
+                BRIGHT_CYAN, BOLD, loop_count, pattern, RESET);
+            
+            #[cfg(target_os = "windows")]
+            {
+                use windows_console::*;
+                if let Ok(console) = ConsoleColor::new() {
+                    console.set_color(CYAN);
+                    println!("Loop #{} - Pattern: {}", loop_count, pattern);
+                    console.set_color(RESET);
+                } else {
+                    println!("Loop #{} - Pattern: {}", loop_count, pattern);
+                }
+            }
             
             let current_size = if arg.to_uppercase() == "MAX" {
                 let (_, avail) = get_available_memory();
-                println!("{}{} bytes ({} MB)", 
-                    msgs.available_memory, 
+                
+                #[cfg(not(target_os = "windows"))]
+                println!("{}{}{} bytes ({} MB){}", 
+                    BRIGHT_WHITE, msgs.available_memory, 
                     avail, 
-                    avail / (1024 * 1024));
+                    avail / (1024 * 1024),
+                    RESET);
+                
+                #[cfg(target_os = "windows")]
+                {
+                    use windows_console::*;
+                    if let Ok(console) = ConsoleColor::new() {
+                        console.set_color(WHITE);
+                        println!("{}{} bytes ({} MB)", 
+                            msgs.available_memory, 
+                            avail, 
+                            avail / (1024 * 1024));
+                        console.set_color(RESET);
+                    } else {
+                        println!("{}{} bytes ({} MB)", 
+                            msgs.available_memory, 
+                            avail, 
+                            avail / (1024 * 1024));
+                    }
+                }
                 avail as usize
             } else {
                 size
@@ -459,7 +1175,7 @@ fn main() {
                 &mut total_errors, 
                 &interrupted, 
                 &mut total_tested, 
-                &mut total_time, 
+                &mut total_time,
                 &msgs
             );
             
@@ -476,24 +1192,105 @@ fn main() {
             &mut total_errors, 
             &interrupted, 
             &mut total_tested, 
-            &mut total_time, 
+            &mut total_time,
             &msgs
         );
     }
     
-    println!("\n\x1b[33m{}\x1b[0m", msgs.summary);
-    if loop_count > 0 {
-        println!("{}{}", msgs.loop_count, loop_count);
+    #[cfg(not(target_os = "windows"))]
+    {
+        println!("\n{}{}{}{}", BRIGHT_YELLOW, BOLD, msgs.summary, RESET);
+        if loop_count > 0 {
+            println!("{}{}{}", BRIGHT_WHITE, msgs.loop_count, loop_count);
+        }
+        println!("{}{}{}", BRIGHT_WHITE, msgs.total_errors, total_errors);
+        println!("{}{}{} bytes ({} MB)", 
+            BRIGHT_WHITE, msgs.total_tested, 
+            total_tested, 
+            total_tested / (1024 * 1024));
     }
-    println!("{}{}", msgs.total_errors, total_errors);
-    println!("{}{} bytes ({} MB)", 
-        msgs.total_tested, 
-        total_tested, 
-        total_tested / (1024 * 1024));
-    println!("{}{:.2}s", msgs.total_time, total_time);
+    
+    #[cfg(target_os = "windows")]
+    {
+        use windows_console::*;
+        if let Ok(console) = ConsoleColor::new() {
+            console.set_color(YELLOW);
+            println!("\n{}", msgs.summary);
+            console.set_color(WHITE);
+            if loop_count > 0 {
+                println!("{}{}", msgs.loop_count, loop_count);
+            }
+            println!("{}{}", msgs.total_errors, total_errors);
+            println!("{}{} bytes ({} MB)", 
+                msgs.total_tested, 
+                total_tested, 
+                total_tested / (1024 * 1024));
+            console.set_color(RESET);
+        } else {
+            println!("\n{}", msgs.summary);
+            if loop_count > 0 {
+                println!("{}{}", msgs.loop_count, loop_count);
+            }
+            println!("{}{}", msgs.total_errors, total_errors);
+            println!("{}{} bytes ({} MB)", 
+                msgs.total_tested, 
+                total_tested, 
+                total_tested / (1024 * 1024));
+        }
+    }
+    
+    // Calculate and display average speed for the entire test
+    if total_time > 0.0 {
+        let avg_speed = total_tested as f64 / total_time;
+        
+        #[cfg(not(target_os = "windows"))]
+        println!("{}{}{:.2}s (avg: {})", 
+            BRIGHT_WHITE, msgs.total_time, total_time, format_speed(avg_speed));
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(WHITE);
+                println!("{}{:.2}s (avg: {})", msgs.total_time, total_time, format_speed(avg_speed));
+                console.set_color(RESET);
+            } else {
+                println!("{}{:.2}s (avg: {})", msgs.total_time, total_time, format_speed(avg_speed));
+            }
+        }
+    } else {
+        #[cfg(not(target_os = "windows"))]
+        println!("{}{}{:.2}s{}", BRIGHT_WHITE, msgs.total_time, total_time, RESET);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(WHITE);
+                println!("{}{:.2}s", msgs.total_time, total_time);
+                console.set_color(RESET);
+            } else {
+                println!("{}{:.2}s", msgs.total_time, total_time);
+            }
+        }
+    }
     println!();
     
     if check_interruption(&interrupted) {
-        println!("\x1b[31m{}\x1b[0m", msgs.interrupted);
+        #[cfg(not(target_os = "windows"))]
+        println!("{}{}{}{}", BRIGHT_RED, BOLD, msgs.interrupted, RESET);
+        
+        #[cfg(target_os = "windows")]
+        {
+            use windows_console::*;
+            if let Ok(console) = ConsoleColor::new() {
+                console.set_color(RED);
+                println!("{}", msgs.interrupted);
+                console.set_color(RESET);
+            } else {
+                println!("{}", msgs.interrupted);
+            }
+        }
     }
 }
+

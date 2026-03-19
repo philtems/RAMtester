@@ -5,10 +5,17 @@ edition = "2021"
 
 [dependencies]
 rand = "0.8.5"
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["sysinfoapi", "memoryapi", "winbase", "wincon", "processenv"] }
 
 [profile.release]
-opt-level = "z"
-lto = true
 codegen-units = 1
+lto = true
+opt-level = "s"
 panic = "abort"
+split-debuginfo = "packed"
 strip = true
+incremental = true
+
