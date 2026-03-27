@@ -1,126 +1,73 @@
-A lightweight, high-performance RAM testing tool written in Rust — designed to stress-test memory, detect hardware faults, and provide detailed error analysis.
+# RAMtester
 
-RAMtester fills your system memory with pseudo-random patterns, verifies data integrity, and reports mismatches with address-level precision. Ideal for diagnosing faulty RAM, overclocking stability, or simply benchmarking your system.
+A comprehensive and efficient RAM memory tester written in Rust.
 
-✨ Features
+## Description
 
-    ✅ Memory allocation up to available RAM — specify size in MB/GB or use MAX
+RAMtester is a memory testing tool that verifies RAM integrity by executing a series of algorithmic tests. It allocates a memory buffer, splits it into two halves, and compares the data to detect potential errors.
 
-    ✅ Write-read-verify cycle
-    
-    ✅ Real-time progress display with time estimates and color-coded console output
+## Features
 
-    ✅ Detailed error reporting — exact address, expected vs actual value
+- **16 different memory tests** including: Standard Fill Test, Random Value, Compare XOR, Compare SUB, Compare MUL, Compare DIV, Compare OR, Compare AND, Sequential Increment, Solid Bits, Block Sequential, Checkerboard, Bit Spread, Bit Flip, Walking Ones, Walking Zeroes
+- **Execution modes**: Normal mode (tests 1-10 and 12-16), Ultra mode (all 16 tests), Single test mode
+- **Color-coded output** with real-time progress display
 
-    ✅ Visual error map — 2D grid showing faulty memory regions
+## Installation
 
-    ✅ Loop mode (--loop) for continuous testing with random patterns
+**Prerequisites:** Rust (version 1.70 or higher). For Windows compilation: `rustup target add x86_64-pc-windows-gnu`
 
-    ✅ Low overhead — compiled with release optimizations, panic=abort, stripped binary
+**Build:** `cargo build --release` for Linux, or `cargo build --target x86_64-pc-windows-gnu --release` for Windows
 
-    ✅ Automatic language detection — English / French (based on LANG env variable)
+The executable is located at `target/release/ramtester` (or `target/x86_64-pc-windows-gnu/release/ramtester.exe` for Windows).
 
-    ✅ No external dependencies (except rand for random pattern generation)
+## Usage
 
-Installation
+**Syntax:** `ramtester <size> [options]`
 
-git clone https://github.com/philtems/RAMtester.git
-cd ramtester
-cargo build --release
-./target/release/ramtester
+**Memory size:**
+- `512M`: 512 Megabytes
+- `2G`: 2 Gigabytes
+- `MAX`: Use 90% of available memory
 
-🚀 Usage
+**Options:**
+- `--test <N>`: Run only test number N
+- `--ultra`: Ultra mode: run all 16 tests
 
-ramtester <size> [--loop]
+**Examples:**
+- `ramtester 512M` — Normal mode with 512 MB
+- `ramtester 1G --ultra` — Ultra mode with 1 GB
+- `ramtester 2G --test 5 --loop` — Test #5 in loop mode
+- `ramtester MAX --ultra` — Use all available memory in ultra mode
 
-Argument	Description
-<size>	Memory size to test. Examples: 512M, 2G, MAX
---loop	Run continuously with random patterns (press Ctrl+C to stop)
+## Test List
 
-Examples
+1. Standard Fill Test
+2. Random Value
+3. Compare XOR
+4. Compare SUB
+5. Compare MUL
+6. Compare DIV
+7. Compare OR
+8. Compare AND
+9. Sequential Increment
+10. Solid Bits
+11. Block Sequential
+12. Checkerboard
+13. Bit Spread
+14. Bit Flip
+15. Walking Ones
+16. Walking Zeroes
 
-# Test 1 GB of RAM once
-ramtester 1G
+*Note: Normal mode excludes test 11 (Block Sequential) due to its slower execution time.*
 
-# Test all available memory (automatically adjusts if loop mode)
-ramtester MAX
+## Behavior
 
-# Continuous testing with 512 MB, random patterns each loop
-ramtester 512M --loop
+Each test allocates a buffer of the requested size and splits it into two halves. Both halves are filled with the same pattern, then compared to detect differences. Errors are displayed with their memory address, and an error map is available for tests with failures.
 
-📊 Output example
-
-RAMtester v3.0
-2025, Philippe TEMESI
-https://www.tems.be
-
-Total system memory: 32768.0 MB.
-Available memory: 31876542464 bytes (30400 MB)
-
-Filling memory...
-[ 100.00%] Filling - Elapsed:     12s - Remaining:      0s
-Filling completed in 12.34s
-
-Verifying memory...
-[ 100.00%] Verifying - Elapsed:     15s - Remaining:      0s
-Verification completed in 15.67s
-
-✓ Test successful: no errors detected.
-
-===== Summary =====
-Total errors detected: 0
-Total memory tested: 1073741824 bytes (1024 MB)
-Total time elapsed: 28.01s
-
-If errors are found:
-
-✗ Test failed: 42 errors.
-
-Memory Error Map (42 total errors)
-1 char = 7340032 bytes
-+----------------------------------------------------------------------+
-|..............#..............#.......................................|
-|......................................#..............................|
-...
-
-Press ESC to continue...
-
-⚙️ How it works
-
-    Allocation — Requests a contiguous block of memory of the specified size.
-
-    Filling — Writes a deterministic, address-dependent pattern to every byte:
-
-value = (address XOR pattern) % 256
-
-    Verification — Reads back each byte and compares with the expected value.
-
-    Reporting — Any mismatch is logged with the exact memory address, expected and actual values.
-
-    Error map — Visual representation of error density across the allocated block.
-
-In --loop mode, each iteration uses a random 8-bit pattern, increasing coverage over time.
-🛠️ Technical details
-Memory safety
-
-    Written in 100% safe Rust — no unsafe code.
-
-    Memory is allocated via Vec<u8>, automatically freed when the test completes or the program exits.
-
-Performance optimizations
-Setting	Effect
-opt-level = "z"	Optimize for binary size
-lto = true	Link-time optimization
-codegen-units = 1	Better optimizations at the cost of build time
-panic = "abort"	No unwinding tables — smaller binary
-strip = true	Removes debug symbols
-
-Resulting binary is < 500 KB statically linked.
-Platform support
-
-Currently Linux only (reads /proc/meminfo for available memory).
+Press `Ctrl+C` to interrupt execution gracefully; a summary of completed tests is displayed upon exit.
 
 
+## Author
 
-# Continuous testing with 512 MB, random patterns each loop
-ramtester 512M --loop
+Philippe TEMESI — https://www.tems.be — 2026
+
