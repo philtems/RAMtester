@@ -1,6 +1,6 @@
 [package]
 name = "ramtester"
-version = "3.0.0"
+version = "4.0.0"
 edition = "2021"
 
 [dependencies]
@@ -18,4 +18,3 @@ panic = "abort"
 split-debuginfo = "packed"
 strip = true
 incremental = true
-
